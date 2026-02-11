@@ -31,44 +31,50 @@ def client():
 # ========== 辅助 Mock 对象 ==========
 
 def _make_mock_stream(text_chunks: list):
-    """创建模拟的 streaming 响应"""
-    class MockStreamManager:
-        def __enter__(self_inner):
-            return self_inner
-        def __exit__(self_inner, *args):
-            pass
-        @property
-        def text_stream(self_inner):
-            return iter(text_chunks)
+    """创建模拟的 streaming 响应（OpenAI 格式）"""
+    chunks = []
+    for text in text_chunks:
+        chunk = MagicMock()
+        delta = MagicMock()
+        delta.content = text
+        choice = MagicMock()
+        choice.delta = delta
+        chunk.choices = [choice]
+        chunks.append(chunk)
+    return iter(chunks)
 
-    return MockStreamManager()
 
-
-def _make_mock_response(text: str, stop_reason: str = "end_turn"):
-    """创建模拟的非 streaming 响应"""
+def _make_mock_response(text: str, finish_reason: str = "stop"):
+    """创建模拟的非 streaming 响应（OpenAI 格式）"""
     mock_resp = MagicMock()
-    mock_resp.stop_reason = stop_reason
-
-    text_block = MagicMock()
-    text_block.type = "text"
-    text_block.text = text
-    mock_resp.content = [text_block]
-
+    message = MagicMock()
+    message.content = text
+    message.tool_calls = None
+    choice = MagicMock()
+    choice.finish_reason = finish_reason
+    choice.message = message
+    mock_resp.choices = [choice]
     return mock_resp
 
 
-def _make_tool_use_response(tool_name: str, tool_input: dict, tool_id: str = "tool_123"):
-    """创建模拟的 tool_use 响应"""
+def _make_tool_call_response(tool_name: str, tool_input: dict, tool_id: str = "call_123"):
+    """创建模拟的 tool_calls 响应（OpenAI 格式）"""
     mock_resp = MagicMock()
-    mock_resp.stop_reason = "tool_use"
 
-    tool_block = MagicMock()
-    tool_block.type = "tool_use"
-    tool_block.name = tool_name
-    tool_block.input = tool_input
-    tool_block.id = tool_id
-    mock_resp.content = [tool_block]
+    tool_call = MagicMock()
+    tool_call.id = tool_id
+    tool_call.function.name = tool_name
+    tool_call.function.arguments = json.dumps(tool_input)
 
+    message = MagicMock()
+    message.content = None
+    message.tool_calls = [tool_call]
+
+    choice = MagicMock()
+    choice.finish_reason = "tool_calls"
+    choice.message = message
+
+    mock_resp.choices = [choice]
     return mock_resp
 
 
@@ -77,13 +83,12 @@ def _make_tool_use_response(tool_name: str, tool_input: dict, tool_id: str = "to
 @patch("app.main.ANTHROPIC_API_KEY", "test-key")
 def test_normal_chat(client):
     """测试 1：发送消息并收到正确的 streaming 响应"""
+    mock_response = _make_mock_response("你好！", finish_reason="stop")
     mock_stream = _make_mock_stream(["你", "好", "！"])
-    mock_response = _make_mock_response("你好！", stop_reason="end_turn")
 
-    with patch("anthropic.Anthropic") as MockClient:
-        instance = MockClient.return_value
-        instance.messages.create.return_value = mock_response
-        instance.messages.stream.return_value = mock_stream
+    with patch("app.main.OpenAI") as MockOpenAI:
+        instance = MockOpenAI.return_value
+        instance.chat.completions.create.side_effect = [mock_response, mock_stream]
 
         response = client.post("/chat", json={
             "session_id": "test-1",
@@ -111,13 +116,12 @@ def test_normal_chat(client):
 @patch("app.main.ANTHROPIC_API_KEY", "test-key")
 def test_multi_turn_context(client):
     """测试 2：连续对话，验证上下文被正确维护"""
+    mock_response = _make_mock_response("回复1", finish_reason="stop")
     mock_stream = _make_mock_stream(["回复1"])
-    mock_response = _make_mock_response("回复1", stop_reason="end_turn")
 
-    with patch("anthropic.Anthropic") as MockClient:
-        instance = MockClient.return_value
-        instance.messages.create.return_value = mock_response
-        instance.messages.stream.return_value = mock_stream
+    with patch("app.main.OpenAI") as MockOpenAI:
+        instance = MockOpenAI.return_value
+        instance.chat.completions.create.side_effect = [mock_response, mock_stream]
 
         # 第一轮对话
         client.post("/chat", json={
@@ -133,13 +137,12 @@ def test_multi_turn_context(client):
     assert history[0]["content"] == "我叫小明"
 
     # 模拟第二轮
+    mock_response2 = _make_mock_response("你叫小明", finish_reason="stop")
     mock_stream2 = _make_mock_stream(["你叫小明"])
-    mock_response2 = _make_mock_response("你叫小明", stop_reason="end_turn")
 
-    with patch("anthropic.Anthropic") as MockClient:
-        instance = MockClient.return_value
-        instance.messages.create.return_value = mock_response2
-        instance.messages.stream.return_value = mock_stream2
+    with patch("app.main.OpenAI") as MockOpenAI:
+        instance = MockOpenAI.return_value
+        instance.chat.completions.create.side_effect = [mock_response2, mock_stream2]
 
         client.post("/chat", json={
             "session_id": "test-multi",
@@ -155,15 +158,14 @@ def test_multi_turn_context(client):
 @patch("app.main.ANTHROPIC_API_KEY", "test-key")
 def test_tool_use(client):
     """测试 3：发送触发工具的消息，验证工具被正确调用"""
-    tool_response = _make_tool_use_response(
-        "get_weather", {"city": "北京"}, "tool_abc"
+    tool_response = _make_tool_call_response(
+        "get_weather", {"city": "北京"}, "call_abc"
     )
     final_stream = _make_mock_stream(["北京", "今天", "晴"])
 
-    with patch("anthropic.Anthropic") as MockClient:
-        instance = MockClient.return_value
-        instance.messages.create.return_value = tool_response
-        instance.messages.stream.return_value = final_stream
+    with patch("app.main.OpenAI") as MockOpenAI:
+        instance = MockOpenAI.return_value
+        instance.chat.completions.create.side_effect = [tool_response, final_stream]
 
         response = client.post("/chat", json={
             "session_id": "test-tool",
@@ -180,8 +182,8 @@ def test_tool_use(client):
         text_events = [e for e in events if e.get("type") == "content_block_delta"]
         assert len(text_events) > 0
 
-        # 验证 create 被调用（tool use 检测阶段）
-        instance.messages.create.assert_called_once()
+        # 验证 create 至少被调用了 2 次（tool 检测 + streaming 回复）
+        assert instance.chat.completions.create.call_count == 2
 
 
 # ========== 测试 4：RAG 检索 ==========
@@ -267,13 +269,12 @@ def test_prompts_endpoint(client):
 @patch("app.main.ANTHROPIC_API_KEY", "test-key")
 def test_session_crud(client):
     """测试会话的创建、查询和删除完整流程"""
+    mock_response = _make_mock_response("测试回复", finish_reason="stop")
     mock_stream = _make_mock_stream(["测试回复"])
-    mock_response = _make_mock_response("测试回复", stop_reason="end_turn")
 
-    with patch("anthropic.Anthropic") as MockClient:
-        instance = MockClient.return_value
-        instance.messages.create.return_value = mock_response
-        instance.messages.stream.return_value = mock_stream
+    with patch("app.main.OpenAI") as MockOpenAI:
+        instance = MockOpenAI.return_value
+        instance.chat.completions.create.side_effect = [mock_response, mock_stream]
 
         # 创建会话（通过发送消息）
         client.post("/chat", json={
