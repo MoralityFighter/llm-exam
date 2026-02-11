@@ -533,13 +533,16 @@ function appendToolCard(data) {
     if (data.tool_name === 'get_weather') {
         const r = data.tool_result;
         const icon = getWeatherIcon(r.condition);
+        const extras = [];
+        if (r.wind_speed) extras.push(`风速 ${r.wind_speed}`);
+        if (r.humidity) extras.push(`湿度 ${r.humidity}`);
         card.className = 'tool-card weather';
         card.innerHTML = `
             <div class="tool-card-icon">${icon}</div>
             <div class="tool-card-body">
-                <div class="tool-card-label">天气查询</div>
+                <div class="tool-card-label">实时天气</div>
                 <div class="tool-card-title">${escapeHtml(r.city)}</div>
-                <div class="tool-card-detail">${escapeHtml(r.condition)}</div>
+                <div class="tool-card-detail">${escapeHtml(r.condition)}${extras.length ? ' · ' + extras.join(' · ') : ''}</div>
             </div>
             <div style="text-align:right;">
                 <div class="tool-card-result">${escapeHtml(r.temperature)}</div>
