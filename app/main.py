@@ -87,7 +87,7 @@ def _build_system_prompt(use_knowledge: bool, query: str = "") -> str:
     """构建 system prompt"""
     knowledge_context = ""
     if use_knowledge and knowledge_store.has_documents():
-        results = knowledge_store.search(query, top_k=3)
+        results = knowledge_store.search(query, top_k=5)
         if results:
             parts = []
             for i, chunk in enumerate(results, 1):
@@ -113,8 +113,16 @@ async def chat(request: ChatRequest):
     # 获取会话历史
     history = session_store.get_history(request.session_id)
 
-    # 构建 system prompt
+    # 构建 system prompt（增加日志用于调试）
     system_prompt = _build_system_prompt(request.use_knowledge, request.message)
+    if request.use_knowledge:
+        import logging
+        logging.info(f"[RAG] use_knowledge={request.use_knowledge}, has_docs={knowledge_store.has_documents()}")
+        logging.info(f"[RAG] system_prompt length={len(system_prompt)}")
+        if "参考资料" in system_prompt:
+            logging.info("[RAG] ✅ 知识库内容已注入 system prompt")
+        else:
+            logging.info("[RAG] ❌ 知识库内容未注入 system prompt")
 
     # 构建消息列表（OpenAI 格式）
     messages = [{"role": "system", "content": system_prompt}]
@@ -310,6 +318,23 @@ async def upload_knowledge(file: UploadFile = File(...)):
 async def get_prompts():
     """获取当前 prompt 模板信息"""
     return get_current_prompt_info()
+
+
+# ========== 知识库调试接口 ==========
+
+@app.get("/knowledge/search")
+async def search_knowledge(q: str, top_k: int = 5):
+    """调试接口：测试知识库检索结果"""
+    if not knowledge_store.has_documents():
+        return {"query": q, "results": [], "message": "知识库为空"}
+    results = knowledge_store.search(q, top_k=top_k)
+    return {
+        "query": q,
+        "top_k": top_k,
+        "result_count": len(results),
+        "results": [{"index": i+1, "chunk": r[:200] + "..." if len(r) > 200 else r} for i, r in enumerate(results)],
+        "stats": knowledge_store.get_stats(),
+    }
 
 
 # ========== 健康检查 ==========
