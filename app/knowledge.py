@@ -15,11 +15,123 @@ class KnowledgeStore:
         """
         上传文档并分块
         返回分块数量
-        优先按段落分块，再按大小切分
+        自动检测 RTF 格式并解析，优先按段落分块
         """
+        # 自动检测并解析 RTF 格式
+        content = self._parse_rtf_if_needed(content)
         chunks = self._split_chunks(content, chunk_size, overlap)
         self._documents[filename] = chunks
         return len(chunks)
+
+    @staticmethod
+    def _parse_rtf_if_needed(text: str) -> str:
+        """检测 RTF 格式并解析为纯文本，非 RTF 直接返回原文"""
+        if not text.strip().startswith('{\\rtf'):
+            return text
+
+        # Step 1: Unicode 转义 \uNNNNN → 实际字符
+        def replace_u(m):
+            code = int(m.group(1))
+            if code < 0:
+                code += 65536
+            try:
+                return chr(code)
+            except (ValueError, OverflowError):
+                return ''
+        decoded = re.sub(r'\\u(-?\d+)\s?', replace_u, text)
+
+        # Step 2: 十六进制转义 \'xx
+        def replace_hex(m):
+            try:
+                return bytes.fromhex(m.group(1)).decode('cp1252', errors='ignore')
+            except Exception:
+                return ''
+        decoded = re.sub(r"\\'([0-9a-fA-F]{2})", replace_hex, decoded)
+
+        # Step 3: 去掉 RTF 头部元数据块（字体表、颜色表等）
+        depth = 0
+        cleaned = []
+        skip_depth = None
+        i = 0
+        while i < len(decoded):
+            ch = decoded[i]
+            if ch == '{':
+                depth += 1
+                rest = decoded[i:i + 30]
+                if any(rest.startswith('{\\' + kw) for kw in
+                       ['fonttbl', 'colortbl', '*\\expandedcolortbl']):
+                    skip_depth = depth
+                i += 1
+            elif ch == '}':
+                if skip_depth is not None and depth == skip_depth:
+                    skip_depth = None
+                depth -= 1
+                i += 1
+            elif skip_depth is not None:
+                i += 1
+            else:
+                cleaned.append(ch)
+                i += 1
+        decoded = ''.join(cleaned)
+
+        # Step 4: 去掉 RTF 控制字（\pard, \fs28 等）
+        decoded = re.sub(r'\\[a-zA-Z]+\d*\s?', '', decoded)
+
+        # Step 5: 清理花括号
+        decoded = decoded.replace('{', '').replace('}', '')
+
+        # Step 6: 用文档中的分隔符标记段落边界
+        decoded = decoded.replace('===$$$===', '\n\n===SECTION===\n\n')
+
+        # Step 7: 合并被 RTF 格式拆散的行（数字和中文经常被分到不同字体组）
+        lines = decoded.split('\n')
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if not line:
+                i += 1
+                continue
+            if len(line) <= 10 and i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if next_line and line != '===SECTION===':
+                    lines[i + 1] = line + next_line
+                    lines[i] = ''
+            i += 1
+
+        # Step 8: 再次合并相邻短行，确保数字+中文连续
+        final_lines = []
+        buf = ''
+        for line in lines:
+            line = line.strip()
+            if line == '===SECTION===':
+                if buf:
+                    final_lines.append(buf)
+                    buf = ''
+                final_lines.append('\n')
+                continue
+            if not line:
+                if buf:
+                    final_lines.append(buf)
+                    buf = ''
+                continue
+            if buf and (
+                re.search(r'[\d]$', buf) and re.match(r'[\u4e00-\u9fff]', line) or
+                re.search(r'[\u4e00-\u9fff]$', buf) and re.match(r'[\d]', line) or
+                len(line) < 20
+            ):
+                buf += line
+            else:
+                if buf:
+                    final_lines.append(buf)
+                buf = line
+        if buf:
+            final_lines.append(buf)
+
+        # 过滤过短的残留行
+        result_lines = [l for l in final_lines if len(l) > 1]
+        result = '\n'.join(result_lines)
+        result = re.sub(r'\n{3,}', '\n\n', result)
+        return result.strip()
 
     def _split_chunks(self, text: str, chunk_size: int, overlap: int) -> List[str]:
         """智能分块：优先按段落/换行分割，保持语义完整性"""

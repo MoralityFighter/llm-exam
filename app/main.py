@@ -292,8 +292,9 @@ async def upload_knowledge(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(status_code=422, detail="文件名不能为空")
 
-    if not (file.filename.endswith(".txt") or file.filename.endswith(".md")):
-        raise HTTPException(status_code=422, detail="仅支持 .txt 和 .md 格式文件")
+    allowed_ext = (".txt", ".md", ".rtf")
+    if not any(file.filename.endswith(ext) for ext in allowed_ext):
+        raise HTTPException(status_code=422, detail="仅支持 .txt、.md 和 .rtf 格式文件")
 
     # 读取文件内容
     content = await file.read()
