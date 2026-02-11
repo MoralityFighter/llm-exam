@@ -3,10 +3,12 @@ LLM 应用开发实战 - 主应用入口
 基于 FastAPI + Claude API (通过 OpenRouter) 的多轮对话服务
 """
 import json
+import os
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from openai import OpenAI, AuthenticationError, APITimeoutError, APIError
 
@@ -17,6 +19,8 @@ from app.knowledge import knowledge_store
 from app.prompt_manager import render_prompt, get_current_prompt_info
 
 # ========== FastAPI App ==========
+
+STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 
 app = FastAPI(
     title="SmartBot API",
@@ -142,6 +146,15 @@ async def chat(request: ChatRequest):
 
                     # 执行工具
                     result = execute_tool(tool_name, tool_input)
+
+                    # 向前端推送 tool_use 事件，用于可视化
+                    tool_event = json.dumps({
+                        "type": "tool_use",
+                        "tool_name": tool_name,
+                        "tool_input": tool_input,
+                        "tool_result": result,
+                    }, ensure_ascii=False)
+                    yield f"data: {tool_event}\n\n"
 
                     tool_messages.append({
                         "role": "tool",
@@ -309,3 +322,16 @@ async def health_check():
         "api_key_configured": bool(ANTHROPIC_API_KEY),
         "knowledge_base": knowledge_store.get_stats(),
     }
+
+
+# ========== 前端页面 ==========
+
+@app.get("/")
+async def serve_frontend():
+    """返回前端页面"""
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+
+# 挂载静态目录（放在最后，避免覆盖 API 路由）
+if os.path.exists(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
